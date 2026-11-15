@@ -1,4 +1,6 @@
 import os
+import re
+from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
@@ -15,6 +17,18 @@ QUALITY_CONFIG = {
     "low": {"bitrate": "96", "rate": "32000"}
 }
 
+def clean_youtube_url(raw_url: str) -> str:
+    """Strips playlist/mix parameters (like &list=RD...) so only the single video is fetched."""
+    parsed = urlparse(raw_url)
+    if parsed.hostname in ("youtu.be", "www.youtu.be"):
+        video_id = parsed.path.lstrip("/")
+        return f"https://www.youtube.com/watch?v={video_id}"
+    if parsed.hostname and "youtube.com" in parsed.hostname:
+        qs = parse_qs(parsed.query)
+        if "v" in qs:
+            return f"https://www.youtube.com/watch?v={qs['v'][0]}"
+    return raw_url
+
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "running"}), 200
@@ -22,18 +36,25 @@ def health():
 @app.route("/api/download", methods=["POST"])
 def download_audio():
     data = request.get_json() or {}
-    url = data.get("url", "").strip()
+    raw_url = data.get("url", "").strip()
     quality = data.get("quality", "high").lower()
 
-    if not url:
+    if not raw_url:
         return jsonify({"error": "YouTube URL is required."}), 400
 
+    clean_url = clean_youtube_url(raw_url)
     config = QUALITY_CONFIG.get(quality, QUALITY_CONFIG["high"])
     output_template = os.path.join(TMP_DIR, "%(id)s.%(ext)s")
 
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": output_template,
+        "noplaylist": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"]
+            }
+        },
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -46,9 +67,9 @@ def download_audio():
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(clean_url, download=True)
             video_id = info.get("id")
-            title = "".join(c for c in info.get("title", "audio") if c.isalnum() or c in (" ", "_", "-")).rstrip()
+            title = re.sub(r'[^\w\s-]', '', info.get("title", "audio")).strip() or "audio"
             mp3_path = os.path.join(TMP_DIR, f"{video_id}.mp3")
 
             if os.path.exists(mp3_path):
@@ -58,7 +79,6 @@ def download_audio():
                     download_name=f"{title}_{quality}.mp3",
                     mimetype="audio/mpeg"
                 )
-                # Clean up temporary file after sending
                 @response.call_on_close
                 def cleanup():
                     if os.path.exists(mp3_path):
