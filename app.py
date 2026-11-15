@@ -11,14 +11,25 @@ CORS(app)
 TMP_DIR = "/tmp/downloads"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+COOKIES_PATH = "/tmp/cookies.txt"
+
 QUALITY_CONFIG = {
     "high": {"bitrate": "320", "rate": "48000"},
     "medium": {"bitrate": "192", "rate": "44100"},
     "low": {"bitrate": "96", "rate": "32000"}
 }
 
+def setup_cookies():
+    """Writes YouTube cookies from Render Environment Variable if provided."""
+    cookies_content = os.environ.get("YT_COOKIES", "").strip()
+    if cookies_content:
+        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+            f.write(cookies_content)
+        return COOKIES_PATH
+    return None
+
 def clean_youtube_url(raw_url: str) -> str:
-    """Strips playlist/mix parameters (like &list=RD...) so only the single video is fetched."""
+    """Strips playlist/mix parameters so only the single video is fetched."""
     parsed = urlparse(raw_url)
     if parsed.hostname in ("youtu.be", "www.youtu.be"):
         video_id = parsed.path.lstrip("/")
@@ -31,7 +42,11 @@ def clean_youtube_url(raw_url: str) -> str:
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "running"}), 200
+    return jsonify({
+        "status": "running",
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies_loaded": bool(os.environ.get("YT_COOKIES"))
+    }), 200
 
 @app.route("/api/download", methods=["POST"])
 def download_audio():
@@ -50,11 +65,6 @@ def download_audio():
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "noplaylist": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
-            }
-        },
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -64,6 +74,10 @@ def download_audio():
         "quiet": True,
         "no_warnings": True,
     }
+
+    cookie_file = setup_cookies()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
